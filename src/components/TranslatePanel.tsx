@@ -63,7 +63,7 @@ export default function TranslatePanel({
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="text-sm font-semibold text-gray-900 mb-2">Translate</h3>
         <p className="text-xs text-gray-400">
-          Run validation first to enable translation.
+          Save to validate before translating.
         </p>
       </div>
     );

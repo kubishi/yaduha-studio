@@ -62,6 +62,7 @@ async function proxyAnthropic(
       system: body.system,
       messages: body.messages,
       stream,
+      ...(body.tools ? { tools: body.tools } : {}),
     }),
   });
 
@@ -77,8 +78,16 @@ async function proxyAnthropic(
     return new NextResponse(res.body, { headers: SSE_HEADERS });
   }
 
-  // Non-streaming: extract text content from Anthropic response
+  // Non-streaming response
   const data = await res.json();
+
+  // When tools are in play, return the full Anthropic response so
+  // the client can see tool_use blocks and stop_reason
+  if (body.tools) {
+    return NextResponse.json(data);
+  }
+
+  // Simple text extraction when no tools
   const text = data.content
     ?.filter((b: { type: string }) => b.type === "text")
     .map((b: { text: string }) => b.text)
@@ -107,6 +116,7 @@ async function proxyOpenAI(
         ...(body.messages as { role: string; content: string }[]),
       ],
       stream,
+      ...(body.tools ? { tools: body.tools } : {}),
     }),
   });
 
@@ -122,8 +132,13 @@ async function proxyOpenAI(
     return new NextResponse(res.body, { headers: SSE_HEADERS });
   }
 
-  // Non-streaming: extract text content from OpenAI response
+  // Non-streaming response
   const data = await res.json();
+
+  if (body.tools) {
+    return NextResponse.json(data);
+  }
+
   const text = data.choices?.[0]?.message?.content ?? "";
   return NextResponse.json({ text });
 }

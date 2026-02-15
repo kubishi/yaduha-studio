@@ -5,30 +5,21 @@ import type { ValidationResult } from "@/lib/pyodide/manager";
 interface ValidationPanelProps {
   result: ValidationResult | null;
   loading: boolean;
-  pyodideReady: boolean;
-  onValidate: () => void;
 }
 
 export default function ValidationPanel({
   result,
   loading,
-  pyodideReady,
-  onValidate,
 }: ValidationPanelProps) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-gray-900">Validation</h3>
-        <button
-          onClick={onValidate}
-          disabled={!pyodideReady || loading}
-          className="rounded-md bg-gray-900 px-3 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {loading ? "Validating..." : pyodideReady ? "Validate" : "Loading Pyodide..."}
-        </button>
-      </div>
+      <h3 className="text-sm font-semibold text-gray-900 mb-3">Validation</h3>
 
-      {result && (
+      {loading && (
+        <p className="text-xs text-gray-400">Validating...</p>
+      )}
+
+      {result && !loading && (
         <div
           className={`rounded-md p-3 text-sm ${
             result.valid
@@ -61,7 +52,7 @@ export default function ValidationPanel({
 
       {!result && !loading && (
         <p className="text-xs text-gray-400">
-          Click Validate to check this language package.
+          Validation runs automatically on load and when you save.
         </p>
       )}
     </div>
