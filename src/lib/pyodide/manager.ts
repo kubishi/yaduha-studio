@@ -31,6 +31,11 @@ export interface SentenceSchema {
   examples: SentenceExample[];
 }
 
+export interface RenderResult {
+  rendered?: string;
+  error?: string;
+}
+
 export interface ValidationResult {
   valid: boolean;
   language?: string;
@@ -123,6 +128,23 @@ export class PyodideManager {
         ...params,
         origin: window.location.origin,
       });
+    });
+  }
+
+  async render(params: {
+    sentenceType: string;
+    data: Record<string, unknown>;
+  }): Promise<RenderResult> {
+    if (!this.worker) {
+      throw new Error("Worker not started. Call start() first.");
+    }
+
+    await this.readyPromise;
+
+    return new Promise((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      this.worker!.postMessage({ type: "render", ...params });
     });
   }
 

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { useSettings } from "@/lib/store";
+import { useSettings, useChatSessions } from "@/lib/store";
+import type { DisplayMessage } from "@/lib/store";
 import { TOOL_DEFINITIONS, executeTool } from "@/lib/assistant/tools";
 import { buildSystemPrompt } from "@/lib/assistant/system-prompt";
 import type { ValidationResult } from "@/lib/pyodide/manager";
@@ -16,11 +17,6 @@ interface TreeNode {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-interface DisplayMessage {
-  type: "user" | "assistant" | "tool-activity";
-  content: string;
-}
-
 interface ChatPanelProps {
   owner: string;
   repo: string;
@@ -28,6 +24,8 @@ interface ChatPanelProps {
   selectedFile: string | null;
   validationResult: ValidationResult | null;
   onFileWrite?: (path: string, content: string) => void;
+  onRender?: (sentenceType: string, data: Record<string, unknown>) => Promise<string | null>;
+  activeTab?: "editor" | "builder" | "translate";
 }
 
 const MAX_TOOL_ITERATIONS = 10;
@@ -39,18 +37,75 @@ export default function ChatPanel({
   selectedFile,
   validationResult,
   onFileWrite,
+  onRender,
+  activeTab = "builder",
 }: ChatPanelProps) {
-  const [displayMessages, setDisplayMessages] = useState<DisplayMessage[]>([]);
-  const [apiMessages, setApiMessages] = useState<any[]>([]);
+  const repoKey = `${owner}/${repo}`;
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showSessionMenu, setShowSessionMenu] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const { anthropicKey, preferredModel } = useSettings();
+  const {
+    getSessions,
+    getActiveSession,
+    createSession,
+    setActiveSession,
+    renameSession,
+    deleteSession,
+    updateSessionMessages,
+  } = useChatSessions();
+
+  const sessions = getSessions(repoKey);
+  const activeSession = getActiveSession(repoKey);
+
+  // Auto-create a session if none exist for this repo
+  useEffect(() => {
+    if (sessions.length === 0) {
+      createSession(repoKey);
+    }
+  }, [repoKey, sessions.length, createSession]);
+
+  // If no active session but sessions exist, select the latest
+  useEffect(() => {
+    if (!activeSession && sessions.length > 0) {
+      setActiveSession(repoKey, sessions[sessions.length - 1].id);
+    }
+  }, [activeSession, sessions, repoKey, setActiveSession]);
+
+  const displayMessages = activeSession?.displayMessages ?? [];
+  const apiMessages = activeSession?.apiMessages ?? [];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [displayMessages]);
+
+  // Close session menu on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowSessionMenu(false);
+        setEditingSessionId(null);
+      }
+    }
+    if (showSessionMenu) {
+      document.addEventListener("mousedown", handleClick);
+      return () => document.removeEventListener("mousedown", handleClick);
+    }
+  }, [showSessionMenu]);
+
+  const persistMessages = useCallback(
+    (newDisplay: DisplayMessage[], newApi: any[]) => {
+      if (activeSession) {
+        updateSessionMessages(activeSession.id, newDisplay, newApi);
+      }
+    },
+    [activeSession, updateSessionMessages]
+  );
 
   async function callLLM(messages: any[], system: string) {
     const headers: Record<string, string> = {
@@ -82,7 +137,7 @@ export default function ChatPanel({
   }
 
   async function sendMessage() {
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || !activeSession) return;
 
     const userText = input.trim();
     setInput("");
@@ -92,7 +147,7 @@ export default function ChatPanel({
       ...displayMessages,
       { type: "user", content: userText },
     ];
-    setDisplayMessages(newDisplay);
+    persistMessages(newDisplay, apiMessages);
 
     const newApiMessages = [
       ...apiMessages,
@@ -105,10 +160,12 @@ export default function ChatPanel({
       fileTree: tree,
       selectedFile,
       validationResult,
+      activeTab,
     });
 
     try {
       let messages = newApiMessages;
+      let currentDisplay = newDisplay;
       let iterations = 0;
 
       while (iterations < MAX_TOOL_ITERATIONS) {
@@ -127,10 +184,11 @@ export default function ChatPanel({
           .join("");
 
         if (textBlocks) {
-          setDisplayMessages((prev) => [
-            ...prev,
+          currentDisplay = [
+            ...currentDisplay,
             { type: "assistant", content: textBlocks },
-          ]);
+          ];
+          persistMessages(currentDisplay, messages);
         }
 
         if (response.stop_reason !== "tool_use") {
@@ -151,16 +209,21 @@ export default function ChatPanel({
                 ? `Reading ${toolUse.input.path}...`
                 : toolUse.name === "list_files"
                   ? `Listing files...`
-                  : `Reading framework: ${toolUse.input.path}...`;
+                  : toolUse.name === "run_examples"
+                    ? `Running examples...`
+                    : `Reading framework: ${toolUse.input.path}...`;
 
-          setDisplayMessages((prev) => [
-            ...prev,
+          currentDisplay = [
+            ...currentDisplay,
             { type: "tool-activity", content: activityLabel },
-          ]);
+          ];
+          persistMessages(currentDisplay, messages);
 
           const result = await executeTool(toolUse.name, toolUse.input, {
             owner,
             repo,
+            validationResult,
+            onRender,
           });
 
           if (toolUse.name === "write_file" && !result.startsWith("Error")) {
@@ -177,22 +240,157 @@ export default function ChatPanel({
         messages = [...messages, { role: "user", content: toolResults }];
       }
 
-      setApiMessages(messages);
+      persistMessages(currentDisplay, messages);
     } catch (e) {
-      setDisplayMessages((prev) => [
-        ...prev,
+      const errorDisplay: DisplayMessage[] = [
+        ...displayMessages,
+        { type: "user", content: userText },
         {
           type: "assistant",
           content: `Error: ${e instanceof Error ? e.message : "Request failed"}`,
         },
-      ]);
+      ];
+      persistMessages(errorDisplay, apiMessages);
     } finally {
       setLoading(false);
     }
   }
 
+  function handleNewSession() {
+    createSession(repoKey);
+    setShowSessionMenu(false);
+  }
+
+  function handleSwitchSession(sessionId: string) {
+    setActiveSession(repoKey, sessionId);
+    setShowSessionMenu(false);
+  }
+
+  function handleStartRename(sessionId: string, currentName: string) {
+    setEditingSessionId(sessionId);
+    setEditingName(currentName);
+  }
+
+  function handleFinishRename() {
+    if (editingSessionId && editingName.trim()) {
+      renameSession(editingSessionId, editingName.trim());
+    }
+    setEditingSessionId(null);
+  }
+
+  function handleDeleteSession(sessionId: string) {
+    if (sessions.length <= 1) return; // keep at least one
+    deleteSession(repoKey, sessionId);
+  }
+
   return (
     <div className="flex flex-col h-full min-h-0">
+      {/* Session bar */}
+      <div className="flex items-center gap-1.5 border-b border-gray-200 px-3 py-1.5 shrink-0">
+        <div className="relative flex-1 min-w-0" ref={menuRef}>
+          <button
+            onClick={() => setShowSessionMenu(!showSessionMenu)}
+            className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-gray-900 transition-colors min-w-0 max-w-full"
+          >
+            <span className="truncate">{activeSession?.name ?? "Chat"}</span>
+            <svg className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {showSessionMenu && (
+            <div className="absolute top-full left-0 mt-1 z-50 w-64 rounded-md border border-gray-200 bg-white shadow-lg">
+              <div className="p-1 max-h-60 overflow-y-auto">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`group flex items-center gap-1 rounded px-2 py-1.5 text-xs ${
+                      session.id === activeSession?.id
+                        ? "bg-gray-100 text-gray-900"
+                        : "text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {editingSessionId === session.id ? (
+                      <input
+                        autoFocus
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        onBlur={handleFinishRename}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleFinishRename();
+                          if (e.key === "Escape") setEditingSessionId(null);
+                        }}
+                        className="flex-1 min-w-0 rounded border border-gray-300 px-1.5 py-0.5 text-xs focus:border-gray-500 focus:outline-none"
+                      />
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleSwitchSession(session.id)}
+                          className="flex-1 min-w-0 text-left truncate"
+                        >
+                          {session.name}
+                          <span className="ml-1 text-gray-400">
+                            ({session.displayMessages.filter((m) => m.type === "user").length})
+                          </span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStartRename(session.id, session.name);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-gray-600 transition-opacity"
+                          title="Rename"
+                        >
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                        </button>
+                        {sessions.length > 1 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteSession(session.id);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-red-500 transition-opacity"
+                            title="Delete"
+                          >
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="border-t border-gray-100 p-1">
+                <button
+                  onClick={handleNewSession}
+                  className="flex items-center gap-1.5 w-full rounded px-2 py-1.5 text-xs text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  New chat
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <button
+          onClick={handleNewSession}
+          className="p-1 text-gray-400 hover:text-gray-600 transition-colors shrink-0"
+          title="New chat"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Messages */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
         {displayMessages.length === 0 && (
           <p className="text-xs text-gray-400 p-2">
@@ -241,6 +439,7 @@ export default function ChatPanel({
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Input */}
       <div className="border-t border-gray-200 p-3">
         <div className="flex gap-2 items-end">
           <textarea

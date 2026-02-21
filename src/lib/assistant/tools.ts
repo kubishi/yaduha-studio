@@ -13,6 +13,8 @@ function decodeBase64Utf8(base64: string): string {
 export interface ToolContext {
   owner: string;
   repo: string;
+  validationResult?: import("@/lib/pyodide/manager").ValidationResult | null;
+  onRender?: (sentenceType: string, data: Record<string, unknown>) => Promise<string | null>;
 }
 
 // Anthropic tool definitions
@@ -92,6 +94,16 @@ export const TOOL_DEFINITIONS = [
       required: ["path"],
     },
   },
+  {
+    name: "run_examples",
+    description:
+      "Run all get_examples() for each sentence type through the render pipeline. Returns a report showing each example's English text, rendered target-language string, and whether it matches the expected output. Use this to verify examples work correctly after making changes.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 export async function executeTool(
@@ -108,6 +120,8 @@ export async function executeTool(
       return writeFile(context, input.path, input.content, input.message);
     case "read_framework_file":
       return readFrameworkFile(input.path, input.repo || "yaduha-2");
+    case "run_examples":
+      return runExamples(context);
     default:
       return `Unknown tool: ${name}`;
   }
@@ -177,6 +191,35 @@ async function writeFile(
   }
 
   return `Successfully wrote ${path}`;
+}
+
+async function runExamples(ctx: ToolContext): Promise<string> {
+  if (!ctx.validationResult?.valid || !ctx.validationResult.schemas) {
+    return "Error: No valid language package. Validation must pass first.";
+  }
+  if (!ctx.onRender) {
+    return "Error: Render function not available.";
+  }
+
+  const lines: string[] = [];
+  for (const [typeName, schema] of Object.entries(ctx.validationResult.schemas)) {
+    lines.push(`## ${typeName}`);
+    if (schema.examples.length === 0) {
+      lines.push("  (no examples defined)");
+      lines.push("");
+      continue;
+    }
+    for (const ex of schema.examples) {
+      const rendered = await ctx.onRender(typeName, ex.structured as Record<string, unknown>);
+      const match = rendered === ex.target;
+      lines.push(`  English:  ${ex.english}`);
+      lines.push(`  Rendered: ${rendered ?? "(render failed)"}`);
+      lines.push(`  Expected: ${ex.target}`);
+      lines.push(`  Match:    ${match ? "YES" : "NO"}`);
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
 }
 
 async function readFrameworkFile(path: string, repo: string): Promise<string> {

@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import CodeEditor, { getLanguageFromPath } from "@/components/CodeEditor";
 import FileTree from "@/components/FileTree";
-import ValidationPanel from "@/components/ValidationPanel";
 import TranslatePanel from "@/components/TranslatePanel";
 import ChatPanel from "@/components/ChatPanel";
+import SentenceBuilder from "@/components/builder/SentenceBuilder";
 import { usePyodide } from "@/hooks/usePyodide";
 import type { ValidationResult } from "@/lib/pyodide/manager";
 
@@ -43,7 +43,18 @@ export default function RepoDetailPage() {
   const [validationResult, setValidationResult] =
     useState<ValidationResult | null>(null);
   const [validating, setValidating] = useState(false);
-  const [activeTab, setActiveTab] = useState<"tools" | "assistant">("tools");
+
+  // Right panel tab: editor (files + code), builder (sentence form), translate
+  const [rightTab, setRightTab] = useState<"editor" | "builder" | "translate">("builder");
+
+  // Persist tab preference
+  useEffect(() => {
+    const saved = localStorage.getItem("yaduha-studio-tab");
+    if (saved === "editor" || saved === "builder" || saved === "translate") setRightTab(saved);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("yaduha-studio-tab", rightTab);
+  }, [rightTab]);
 
   // Dirty = edited since last save/validate
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set());
@@ -53,8 +64,16 @@ export default function RepoDetailPage() {
 
   // All files content for validation
   const [repoFiles, setRepoFiles] = useState<Record<string, string>>({});
+  // Ref for latest repoFiles (avoids stale closure in runValidation)
+  const repoFilesRef = useRef(repoFiles);
+  useEffect(() => {
+    repoFilesRef.current = repoFiles;
+  }, [repoFiles]);
 
-  const { ready: pyodideReady, validate, translate } = usePyodide();
+  // Validation tooltip hover
+  const [showValidationTooltip, setShowValidationTooltip] = useState(false);
+
+  const { ready: pyodideReady, validate, translate, render } = usePyodide();
 
   // Fetch repo file tree
   const fetchTree = useCallback(async function fetchTreeInner(path = ""): Promise<TreeNode[]> {
@@ -140,26 +159,34 @@ export default function RepoDetailPage() {
     }
   }
 
-  // Run validation
+  // Run validation (uses repoFilesRef to avoid stale closure)
   const runValidation = useCallback(async () => {
     if (!pyodideReady) return;
 
     setValidating(true);
     try {
       const allPaths = collectFilePaths(tree);
-      const allFiles: Record<string, string> = { ...repoFiles };
+      const currentFiles = repoFilesRef.current;
 
-      const missing = allPaths.filter((p) => !(p in allFiles));
+      const missing = allPaths.filter((p) => !(p in currentFiles));
+      const fetchedMap: Record<string, string> = {};
       const fetched = await Promise.all(
         missing.map(async (p) => ({ path: p, content: await fetchFileContent(p) }))
       );
       for (const { path, content } of fetched) {
         if (content !== null) {
-          allFiles[path] = content;
+          fetchedMap[path] = content;
         }
       }
 
-      setRepoFiles(allFiles);
+      // Only merge newly fetched files — use functional update to avoid
+      // overwriting concurrent state changes (e.g. from agent file writes)
+      if (Object.keys(fetchedMap).length > 0) {
+        setRepoFiles((prev) => ({ ...prev, ...fetchedMap }));
+      }
+
+      // Build complete file map for validation using latest ref + fetched
+      const allFiles = { ...repoFilesRef.current, ...fetchedMap };
       const result = await validate(allFiles);
       setValidationResult(result);
     } catch (e) {
@@ -259,30 +286,85 @@ export default function RepoDetailPage() {
     }
   }
 
-  // Callback for ChatPanel when assistant writes a file
+  // Callback for ChatPanel when assistant writes a file.
+  // The write_file tool already commits directly to GitHub,
+  // so we only update local state — do NOT mark as unpushed.
   function handleAssistantFileWrite(path: string, content: string) {
+    // Update ref immediately so runValidation sees the new content
+    // (the ref normally lags behind state by one render cycle)
+    repoFilesRef.current = { ...repoFilesRef.current, [path]: content };
     setRepoFiles((prev) => ({ ...prev, [path]: content }));
     // If this is the currently selected file, update the editor
     if (path === selectedFile) {
       setFileContent(content);
     }
-    // Mark as dirty — same as a user edit
-    setDirtyFiles((prev) => new Set(prev).add(path));
-    // Invalidate validation
+    // Invalidate validation and auto-revalidate
     setValidationResult(null);
     // Refresh the tree in case a new file was created
     fetchTree().then(setTree);
+    // Auto-validate after state settles
+    setTimeout(() => runValidation(), 0);
   }
+
+  // Render a sentence via Pyodide
+  const handleRender = useCallback(
+    async (
+      sentenceType: string,
+      data: Record<string, unknown>
+    ): Promise<string | null> => {
+      try {
+        const result = await render({ sentenceType, data });
+        return result.rendered ?? null;
+      } catch {
+        return null;
+      }
+    },
+    [render]
+  );
 
   const hasDirtyFiles = dirtyFiles.size > 0;
   const hasUnpushedFiles = unpushedFiles.size > 0;
 
+  // Validation indicator
+  const validationDot = validating
+    ? "bg-yellow-400 animate-pulse"
+    : validationResult?.valid
+      ? "bg-green-500"
+      : validationResult
+        ? "bg-red-500"
+        : "bg-gray-300";
+
+  const validationTooltipText = validating
+    ? "Validating..."
+    : validationResult?.valid
+      ? `${validationResult.name} (${validationResult.language}) — ${validationResult.sentence_types?.length ?? 0} sentence type${(validationResult.sentence_types?.length ?? 0) !== 1 ? "s" : ""}`
+      : validationResult
+        ? `${validationResult.error_type}: ${validationResult.error}`
+        : "Not yet validated";
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      {/* Header bar */}
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-gray-900">
-          {owner}/{repo}
-        </h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-bold text-gray-900">
+            {owner}/{repo}
+          </h1>
+          {/* Validation indicator */}
+          <div
+            className="relative"
+            onMouseEnter={() => setShowValidationTooltip(true)}
+            onMouseLeave={() => setShowValidationTooltip(false)}
+          >
+            <span className={`inline-block w-2.5 h-2.5 rounded-full ${validationDot}`} />
+            {showValidationTooltip && (
+              <div className="absolute top-full left-0 mt-1 z-50 w-72 rounded-md border border-gray-200 bg-white p-2 shadow-lg">
+                <p className="text-xs text-gray-600 whitespace-pre-wrap">{validationTooltipText}</p>
+              </div>
+            )}
+          </div>
+        </div>
+
         <div className="flex items-center gap-2">
           <button
             onClick={handleSave}
@@ -309,110 +391,116 @@ export default function RepoDetailPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-4" style={{ height: "calc(100vh - 200px)" }}>
-        {/* File tree sidebar */}
-        <div className="col-span-3 rounded-lg border border-gray-200 bg-white p-3 overflow-y-auto">
-          <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-            Files
-          </h2>
-          {loadingTree ? (
-            <p className="text-sm text-gray-400">Loading...</p>
-          ) : (
-            <FileTree
-              nodes={tree}
-              onSelectFile={handleSelectFile}
-              selectedPath={selectedFile ?? undefined}
-            />
-          )}
+      {/* Main layout: Chat (left) | Tabbed panel (right) */}
+      <div className="grid grid-cols-2 gap-4" style={{ height: "calc(100vh - 180px)" }}>
+        {/* Left: Chat assistant (always visible) */}
+        <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+          <ChatPanel
+            owner={owner}
+            repo={repo}
+            tree={tree}
+            selectedFile={selectedFile}
+            validationResult={validationResult}
+            onFileWrite={handleAssistantFileWrite}
+            onRender={handleRender}
+            activeTab={rightTab}
+          />
         </div>
 
-        {/* Editor */}
-        <div className="col-span-5 rounded-lg border border-gray-200 bg-white overflow-hidden">
-          {selectedFile ? (
-            loadingFile ? (
-              <div className="flex items-center justify-center h-full">
-                <p className="text-sm text-gray-400">Loading file...</p>
-              </div>
-            ) : (
-              <div className="h-full flex flex-col">
-                <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2">
-                  <span className="text-xs text-gray-500">
-                    {selectedFile}
-                    {dirtyFiles.has(selectedFile) && (
-                      <span className="ml-1 text-amber-500">*</span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex-1">
-                  <CodeEditor
-                    value={fileContent}
-                    language={getLanguageFromPath(selectedFile)}
-                    onChange={handleEditorChange}
-                    validationResult={validationResult}
-                    filePath={selectedFile}
-                  />
-                </div>
-              </div>
-            )
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <p className="text-sm text-gray-400">
-                Select a file from the tree to start editing
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* Right sidebar: tabbed */}
-        <div className="col-span-4 flex flex-col rounded-lg border border-gray-200 bg-white overflow-hidden">
+        {/* Right: tabbed panel */}
+        <div className="flex flex-col rounded-lg border border-gray-200 bg-white overflow-hidden">
           {/* Tab bar */}
-          <div className="flex border-b border-gray-200">
-            <button
-              onClick={() => setActiveTab("tools")}
-              className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                activeTab === "tools"
-                  ? "text-gray-900 border-b-2 border-gray-900"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              Validate & Translate
-            </button>
-            <button
-              onClick={() => setActiveTab("assistant")}
-              className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                activeTab === "assistant"
-                  ? "text-gray-900 border-b-2 border-gray-900"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              Assistant
-            </button>
+          <div className="flex border-b border-gray-200 shrink-0">
+            {(["editor", "builder", "translate"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setRightTab(tab)}
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors capitalize ${
+                  rightTab === tab
+                    ? "text-gray-900 border-b-2 border-gray-900"
+                    : "text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
           </div>
 
           {/* Tab content */}
-          {activeTab === "tools" ? (
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-4 p-0">
-              <ValidationPanel
-                result={validationResult}
-                loading={validating}
-              />
-              <TranslatePanel
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {rightTab === "editor" && (
+              <div className="flex h-full">
+                {/* File tree */}
+                <div className="w-48 shrink-0 border-r border-gray-200 p-2 overflow-y-auto">
+                  <h2 className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
+                    Files
+                  </h2>
+                  {loadingTree ? (
+                    <p className="text-xs text-gray-400">Loading...</p>
+                  ) : (
+                    <FileTree
+                      nodes={tree}
+                      onSelectFile={handleSelectFile}
+                      selectedPath={selectedFile ?? undefined}
+                    />
+                  )}
+                </div>
+                {/* Code editor */}
+                <div className="flex-1 min-w-0">
+                  {selectedFile ? (
+                    loadingFile ? (
+                      <div className="flex items-center justify-center h-full">
+                        <p className="text-sm text-gray-400">Loading file...</p>
+                      </div>
+                    ) : (
+                      <div className="h-full flex flex-col">
+                        <div className="flex items-center border-b border-gray-200 px-3 py-1.5 shrink-0">
+                          <span className="text-xs text-gray-500 truncate">
+                            {selectedFile}
+                            {dirtyFiles.has(selectedFile) && (
+                              <span className="ml-1 text-amber-500">*</span>
+                            )}
+                          </span>
+                        </div>
+                        <div className="flex-1 min-h-0">
+                          <CodeEditor
+                            value={fileContent}
+                            language={getLanguageFromPath(selectedFile)}
+                            onChange={handleEditorChange}
+                            validationResult={validationResult}
+                            filePath={selectedFile}
+                          />
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    <div className="flex items-center justify-center h-full">
+                      <p className="text-sm text-gray-400">
+                        Select a file to edit
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {rightTab === "builder" && (
+              <SentenceBuilder
                 validationResult={validationResult}
-                onTranslate={translate}
+                validating={validating}
+                onRender={handleRender}
               />
-            </div>
-          ) : (
-            <div className="flex-1 min-h-0">
-              <ChatPanel
-                owner={owner}
-                repo={repo}
-                tree={tree}
-                selectedFile={selectedFile}
-                validationResult={validationResult}
-                onFileWrite={handleAssistantFileWrite}
-              />
-            </div>
-          )}
+            )}
+
+            {rightTab === "translate" && (
+              <div className="h-full overflow-y-auto">
+                <TranslatePanel
+                  validationResult={validationResult}
+                  onTranslate={translate}
+                />
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

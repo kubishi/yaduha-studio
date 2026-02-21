@@ -13,12 +13,13 @@ interface SystemPromptContext {
   fileTree: TreeNode[];
   selectedFile: string | null;
   validationResult: ValidationResult | null;
+  activeTab?: "editor" | "builder" | "translate";
 }
 
 function formatTree(nodes: TreeNode[], indent = ""): string {
   let out = "";
   for (const node of nodes) {
-    out += `${indent}${node.type === "dir" ? "📁" : "📄"} ${node.name}\n`;
+    out += `${indent}${node.type === "dir" ? "\u{1F4C1}" : "\u{1F4C4}"} ${node.name}\n`;
     if (node.children) {
       out += formatTree(node.children, indent + "  ");
     }
@@ -37,7 +38,15 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
       : `Invalid: ${ctx.validationResult.error}`
     : "Not yet validated";
 
+  const activeTab = ctx.activeTab ?? "builder";
+
   return `You are an expert assistant for building yaduha language packages. You help users create and refine structured language translation packages using the yaduha framework.
+
+The user sees this chat on the left side of their screen. On the right side they can switch between three tabs: **Editor** (file tree + code editor), **Builder** (interactive sentence builder), and **Translate** (English-to-target translation pipeline). They currently have the **${activeTab}** tab open.
+
+When you write files, validation runs automatically and the builder/translate panels update. After making changes, tell the user to check the builder or translate tab to see results.
+
+Many users are linguists who may not be comfortable with code. Adapt your communication style accordingly — focus on what changed in terms of language features (vocabulary, grammar rules, sentence patterns) rather than code details, unless the user is clearly a developer.
 
 ## Yaduha Framework Overview
 
@@ -118,6 +127,7 @@ Use \`read_framework_file\` to look up source code:
 - **Repository**: ${ctx.owner}/${ctx.repo}
 - **Selected file**: ${ctx.selectedFile || "(none)"}
 - **Validation**: ${validationStatus}
+- **Active tab**: ${activeTab}
 
 ### File Tree
 \`\`\`
@@ -127,7 +137,9 @@ ${treeSummary}\`\`\`
 
 - When the user asks about their code, use \`read_file\` to look at it first.
 - When making changes, use \`write_file\` to update files directly.
+- After making changes, use \`run_examples\` to verify all examples still render correctly.
 - Refer to the yaduha-ovp example when users need implementation patterns.
 - Focus on making the package pass validation: correct \`__str__\`, valid \`get_examples\`, proper pyproject.toml entrypoint.
-- Be concise and practical. Show code when helpful.`;
+- When the user reports that a sentence looks wrong in the builder, read the relevant code, understand the morphology rules, and fix the \`__str__\` method.
+- Be proactive: suggest what to build next based on the current state of the package.`;
 }

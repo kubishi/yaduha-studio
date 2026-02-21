@@ -259,6 +259,44 @@ json.dumps(result)
     }
   }
 
+  if (type === "render") {
+    const { sentenceType, data } = event.data;
+    try {
+      if (!pyodide) throw new Error("Pyodide not initialized");
+
+      pyodide.globals.set("_render_sentence_type", sentenceType);
+      pyodide.globals.set("_render_data", JSON.stringify(data));
+
+      const result = pyodide.runPython(`
+import json
+
+try:
+    _render_st_class = None
+    for _st in language.sentence_types:
+        if _st.__name__ == _render_sentence_type:
+            _render_st_class = _st
+            break
+
+    if _render_st_class is None:
+        _render_output = {"error": f"Unknown sentence type: {_render_sentence_type}"}
+    else:
+        _render_instance = _render_st_class(**json.loads(_render_data))
+        _render_output = {"rendered": str(_render_instance)}
+except Exception as e:
+    _render_output = {"error": str(e)}
+
+json.dumps(_render_output)
+`);
+
+      self.postMessage({ type: "result", data: JSON.parse(result) });
+    } catch (e) {
+      self.postMessage({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
   if (type === "translate") {
     const { english, provider, model, apiKey, origin } = event.data;
     console.log("[worker] translate request:", { english, provider, model, hasApiKey: !!apiKey, origin });

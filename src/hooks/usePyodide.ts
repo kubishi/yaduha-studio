@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { PyodideManager, type ValidationResult, type TranslateResult } from "@/lib/pyodide/manager";
+import { PyodideManager, type ValidationResult, type TranslateResult, type RenderResult } from "@/lib/pyodide/manager";
 
 export function usePyodide() {
   const managerRef = useRef<PyodideManager | null>(null);
@@ -49,5 +49,15 @@ export function usePyodide() {
     return managerRef.current.translate(params);
   }
 
-  return { ready, loading, validate, translate };
+  async function render(params: {
+    sentenceType: string;
+    data: Record<string, unknown>;
+  }): Promise<RenderResult> {
+    if (!managerRef.current) {
+      throw new Error("Pyodide not initialized");
+    }
+    return managerRef.current.render(params);
+  }
+
+  return { ready, loading, validate, translate, render };
 }
