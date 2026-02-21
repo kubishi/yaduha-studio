@@ -1,36 +1,34 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Yaduha Studio
 
-## Getting Started
+A web IDE for building [yaduha](https://github.com/kubishi/yaduha-2) language packages — AI-assisted rule-based machine translation for low-resource languages.
 
-First, run the development server:
+Linguists describe grammar rules in natural language through a chat assistant. The agent writes Python code behind the scenes, validates it via in-browser Pyodide, and a live sentence builder hot-reloads so users can immediately test translations.
+
+## Features
+
+- **AI Assistant** — LLM-powered chat that reads, writes, and validates language package code
+- **Sentence Builder** — Interactive form generated from Pydantic JSON schemas, renders target-language sentences in real time
+- **Code Editor** — Monaco-based editor for direct file editing
+- **Translation** — Translate English sentences using the language package's grammar rules
+- **GitHub Integration** — OAuth login, repo management, fork templates, push changes
+
+## Stack
+
+Next.js 16 on Cloudflare Workers (via [OpenNext](https://github.com/opennextjs/opennextjs-cloudflare)). Pyodide for in-browser Python validation and rendering. Zustand for client state. Anthropic API for the assistant.
+
+## Development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Requires a `.dev.vars` file with `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET`, and optionally `ANTHROPIC_API_KEY`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deploy
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run deploy
+```
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Deploys to Cloudflare Workers. Set secrets via `wrangler secret put`.
